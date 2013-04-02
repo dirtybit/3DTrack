@@ -4,7 +4,7 @@ from visual import *
 from socket import socket, AF_INET, SOCK_STREAM
 
 HOST = 'localhost' # Symbolic name meaning all available interfaces
-PORT = 50007 # Arbitrary non-privileged port
+PORT = 9090 # Arbitrary non-privileged port
 
 WIDTH  = 6.
 LENGTH = 8.
@@ -74,24 +74,26 @@ if __name__ == '__main__':
     group.add_argument("--net", action="store", type=str)
     args = parser.parse_args()
     
+    print 'here1'
     arena = box(pos=(0, 0, 0), width=LENGTH, height=HEIGHT, length=WIDTH, color=(0.6,0.6,0.6), opacity=0.2)
     copter = sphere(pos=transform_w2f(0,0,0), radius=0.05, color=color.red)
     clabel = label(pos=(0,HEIGHT+.2,0), text='This is a box', line=False)
     copter.trail = curve(color=(1, 0.2, 0.2))
     copter.velocity = vector(0.1,0.1,0.1)
-
+    print 'here'
+    
     if args.net:
-        sock = socket(AF_INET, SOCK_STREAM)
-        sock.bind((HOST, PORT))
-        sock.listen(1)
-        conn, addr = sock.accept()
-        print 'Connected by', addr
+        net_str = args.net.split(':')
+        HOST, PORT = net_str[0], int(net_str[1])
+        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client.connect((HOST, PORT))
+        print 'connected'
         while 1:
-            data = conn.recv(1024)
+            data = client.recv(1024)
             if not data: break
-            data = map(float, data.split(' '))
+            data = map(float, data.split(', '))
             x, y, z, dt = data[0], data[1], data[2], data[3]
-            rate (int(1000/dt))
+            rate(int(1000/dt))
             copter.pos = transform_w2f(x, y, z) #copter.pos + copter.velocity*dt
             copter.trail.append(pos=copter.pos)
             clabel.text = '%.2f, %.2f, %.2f' % transform_f2w(*tuple(copter.pos))
@@ -105,8 +107,8 @@ if __name__ == '__main__':
         for l in tfile:
             if l.startswith('Time'):
                 dt = float(l.split('=')[-1].split(' ')[0])
-            rate (int(1000/dt))
-            if l.startswith('3D'):           
+            rate(int(1000/dt))
+            if l.startswith('3D'):
                 #l = l.split(' = ')[-1].split(', ')
                 l = l.split('(', 1)[1].split(')')[0].split(', ')
                 x = float(l[0])
