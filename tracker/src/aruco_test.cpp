@@ -1,67 +1,30 @@
 #include <iostream>
 #include <fstream>
 #include <sstream>
+#include <unistd.h>
+#include <errno.h>
+#include <string.h>
+#include <semaphore.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netdb.h>
+#include <arpa/inet.h>
 #include "aruco.h"
 #include "cvdrawingutils.h"
 using namespace cv;
 using namespace aruco;
 
-string TheInputVideo;
-string TheIntrinsicFile;
-float TheMarkerSize=-1;
-int ThePyrDownLevel;
-MarkerDetector MDetector;
-VideoCapture TheVideoCapturer;
-vector<Marker> TheMarkers;
-Mat TheInputImage,TheInputImageCopy;
-CameraParameters TheCameraParameters;
-void cvTackBarEvents(int pos,void*);
-bool readCameraParameters(string TheIntrinsicFile,CameraParameters &CP,Size size);
+#define PORT 9090
 
-pair<double,double> AvrgTime(0,0) ;//determines the average time required for detection
-double ThresParam1,ThresParam2;
-int iThresParam1,iThresParam2;
-int waitTime=0;
-int fps=15;
+sem_t sem;
+pthread_mutex_t mutex;
+
 int width=320;
 int height=240;
 
-/************************************
- *
- *
- *
- *
- ************************************/
-bool readArguments ( int argc,char **argv )
-{
-    if (argc<2) {
-        cerr<<"Invalid number of arguments"<<endl;
-        cerr<<"Usage: (in.avi|live) [fps] [width] [height] [intrinsics.yml] [size]"<<endl;
-        return false;
-    }
-    TheInputVideo=argv[1];
-    if (argc>=3)
-        fps=atoi(argv[2]);
-    if (argc>=4)
-        width=atoi(argv[3]);
-    if (argc>=5)
-        height=atoi(argv[4]);
+char pos_data[200];
 
-    if (argc>=6)
-        TheIntrinsicFile=argv[5];
-    if (argc>=7)
-        TheMarkerSize=atof(argv[6]);
-
-    if (argc==6)
-        cerr<<"NOTE: You need makersize to see 3d info!!!!"<<endl;
-    return true;
-}
-/************************************
- *
- *
- *
- *
- ************************************/
 cv::Mat rmat(cv::Mat u, cv::Mat v, cv::Mat w) {
 	cv::Mat m = cv::Mat::eye(4, 4, CV_32F);
 	for(int i=0; i<3; i++) {
@@ -81,47 +44,38 @@ cv::Mat tmat(cv::Mat t) {
 	return m;
 }
 
-cv::Mat localize(cv::Mat frame)
+cv::Mat localize(MarkerDetector &markerDetector, cv::Mat &frame, vector<Marker> &markers, CameraParameters cameraParameters, float markerSize)
 {
-	MDetector.detect(TheInputImage,TheMarkers,TheCameraParameters,TheMarkerSize);
+	markerDetector.detect(frame, markers, cameraParameters, markerSize);
 	    
 	float maxArea = 0;
 	float markerArea = 0;
 	Marker *chosen = NULL;
 	cv::Mat pos3D = cv::Mat::zeros(4, 1, CV_32F);
 
-	for (unsigned int i=0;i<TheMarkers.size();i++) {
-		markerArea = TheMarkers[i].getArea();
+	for (unsigned int i=0;i<markers.size();i++) {
+		markerArea = markers[i].getArea();
 		if (markerArea > maxArea) {
-			chosen = &TheMarkers[i];
+			chosen = &markers[i];
 			maxArea = markerArea;
 		}
 	}
 
 	if (chosen) {
 		cv::Mat r(3,3,CV_32F);
+		cv::Mat coord = cv::Mat::zeros(3,1,CV_32F);
 		cv::Mat coord_ = cv::Mat::zeros(4,1,CV_32F);
 		coord_.at<float>(3, 0) = 1;
-		cv::Mat coord(3,1,CV_32F);
 		cv::Mat u = cv::Mat::zeros(3,1,CV_32F);
 		cv::Mat v = cv::Mat::zeros(3,1,CV_32F);
 		cv::Mat w = cv::Mat::zeros(3,1,CV_32F);
-
-		//Unit vectors of Fm
 		u.at<float>(0,0) = 1;
 		v.at<float>(1,0) = 1;
 		w.at<float>(2,0) = 1;
-		
-		coord.at<float>(0,0) = 0;
-		coord.at<float>(1,0) = 0;
-		coord.at<float>(2,0) = 0;
-		
 		cv::Mat rotation = chosen->Rvec;
 		Rodrigues(rotation, r);
 		coord = r * coord;
-		coord = coord + chosen->Tvec;
-		
-		// Find unit vectors of Fm wrt Fg
+		coord = coord + chosen->Tvec; 
 		u = r * u;
 		u = u + chosen->Tvec;       
 		v = r * v;
@@ -131,142 +85,180 @@ cv::Mat localize(cv::Mat frame)
 		u -= coord;
 		v -= coord;
 		w -= coord;
-		
-		// Find translation, rotation, and transformation matrix for Fm -> Fg
 		cv::Mat R = rmat(u, v, w);
 		cv::Mat T = tmat(coord);
 		cv::Mat M = R*T;
 		coord_ = M*coord_;
-
-		pos3D = coord_;
+		pos3D.at<float>(0, 0) = -coord_.at<float>(2, 0);
+		pos3D.at<float>(1, 0) = -coord_.at<float>(0, 0);
+		pos3D.at<float>(2, 0) = coord_.at<float>(1, 0);
 	}
 
 	return pos3D;
 }
 
+void* run_server(void *args)
+{
+	int sock, conn, bytes_received, flag = 1;
+	struct sockaddr_in server_addr, client_addr;
+	socklen_t sin_size;
+
+	if ((sock = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
+		perror("Socket");
+		exit(1);
+	}
+
+	if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &flag, sizeof (int)) == -1) {
+		perror("Setsockopt");
+		exit(1);
+	}
+
+	server_addr.sin_family = AF_INET;
+	server_addr.sin_port = htons(PORT);
+	server_addr.sin_addr.s_addr = INADDR_ANY;
+	bzero(&(server_addr.sin_zero), 8);
+
+	if (bind(sock, (struct sockaddr *) &server_addr, sizeof (struct sockaddr))
+	    == -1) {
+		perror("Unable to bind");
+		exit(1);
+	}
+
+	if (listen(sock, 5) == -1) {
+		perror("Listen");
+		exit(1);
+	}
+
+	printf("\nTCPServer Waiting for client on port %d\n", PORT);
+	fflush(stdout); 
+
+	sin_size = sizeof(client_addr);
+	conn = accept(sock, (struct sockaddr *) &client_addr, &sin_size);
+	cout << "Connected" << endl;
+
+	while(1) {
+		sem_wait(&sem);
+		pthread_mutex_lock(&mutex);
+		send(conn, pos_data, strlen(pos_data), 0);
+		pthread_mutex_unlock(&mutex);
+	}
+}
 
 int main(int argc,char **argv)
 {
-    try
-    {
-        if (readArguments (argc,argv)==false) {
-            return 0;
-        }
-        //parse arguments
-        ;
-        //read from camera or from  file
-        if (TheInputVideo=="live") {
-		cout << TheVideoCapturer.open(0) << endl;
-            waitTime=100;
-
-		TheVideoCapturer.set(CV_CAP_PROP_FPS, fps);
-		TheVideoCapturer.set(CV_CAP_PROP_FRAME_WIDTH, width);
-		TheVideoCapturer.set(CV_CAP_PROP_FRAME_HEIGHT, height);
-		
-        }
-        else  TheVideoCapturer.open(TheInputVideo);
-        //check video is open
-        if (!TheVideoCapturer.isOpened()) {
-            cerr<<"Could not open video"<<endl;
-            return -1;
-
-        }
-
-        //read first image to get the dimensions
-        TheVideoCapturer>>TheInputImage;
-
-        //read camera parameters if passed
-        if (TheIntrinsicFile!="") {
-            TheCameraParameters.readFromXMLFile(TheIntrinsicFile);
-            TheCameraParameters.resize(TheInputImage.size());
-        }
-        //Configure other parameters
-        if (ThePyrDownLevel>0)
-            MDetector.pyrDown(ThePyrDownLevel);
-
-
-        //Create gui
-
-        //cv::namedWindow("thres",1);
-        cv::namedWindow("in",1);
-        MDetector.getThresholdParams( ThresParam1,ThresParam2);
-        MDetector.setCornerRefinementMethod(MarkerDetector::LINES);
-        iThresParam1=ThresParam1;
-        iThresParam2=ThresParam2;
-        //cv::createTrackbar("ThresParam1", "in",&iThresParam1, 13, cvTackBarEvents);
-        //cv::createTrackbar("ThresParam2", "in",&iThresParam2, 13, cvTackBarEvents);
-
-        ThresParam1=13;
-        ThresParam2=2;
-	MDetector.setThresholdParams(ThresParam1,ThresParam2);
-
-        char key=0;
-        int index=0;
+	string inputSource;
+	string intrinsicFile;
+	float markerSize=-1;
+	int pyrDownLevel = 0;
+	MarkerDetector markerDetector;
+	VideoCapture capture;
+	vector<Marker> markers;
+	Mat inputImage;
+	CameraParameters cameraParameters;
+	pair<double,double> avgTime(0,0) ;//determines the average time required for detection
+	float thresParam1, thresParam2;		
+	int index=0;
 	Mat pos3D;
-        //capture until press ESC or until the end of the video
+	double tick;
 
-	double tick = (double)getTickCount();//for checking the speed
+	// Initialize sync 	
+	pthread_t child;
+	pthread_attr_t attr;
+	pthread_attr_init(&attr);
+
+	pthread_mutex_init(&mutex, NULL);
+	sem_init(&sem, 0, 0);
+
+
+	pthread_create(&child, &attr, run_server, NULL);
+
+	try {
+		// Read command-line arguments
+		if (argc<2) {
+			cerr<<"Invalid number of arguments"<<endl;
+			cerr<<"Usage: (in.avi|live) [width] [height] [intrinsics.yml] [size]"<<endl;
+			return false;
+		}
+
+		inputSource=argv[1];
+
+		if (argc > 2)
+			width=atoi(argv[2]);
+		if (argc > 3)
+			height=atoi(argv[3]);
+
+		if (argc > 4)
+			intrinsicFile=argv[4];
+		if (argc > 5)
+			markerSize=atof(argv[5]);
+
+		if (argc==5)
+			cerr<<"NOTE: You need makersize to see 3d info!!!!"<<endl;
+
+		//read from camera or from  file
+		if (inputSource=="live") {
+			cout << capture.open(0) << endl;
+
+			capture.set(CV_CAP_PROP_FRAME_WIDTH, width);
+			capture.set(CV_CAP_PROP_FRAME_HEIGHT, height);
+		
+		}
+		else  
+			capture.open(inputSource);
+		
+		if (!capture.isOpened()) {
+			cerr << "Could not open video" << endl;
+			return -1;
+
+		}
+
+		// Read camera paramters
+		if (intrinsicFile!="") {
+			capture >> inputImage;
+			cameraParameters.readFromXMLFile(intrinsicFile);
+			cameraParameters.resize(inputImage.size());
+		}
+
+		if (pyrDownLevel > 0)
+			markerDetector.pyrDown(pyrDownLevel);
+
+		cv::namedWindow("in", 1);
+		
+		//markerDetector.getThresholdParams(ThresParam1, ThresParam2);
+		//markerDetector.setCornerRefinementMethod(MarkerDetector::LINES);
+		
+		thresParam1 = 13;
+		thresParam2 = 2;
+		markerDetector.setThresholdParams(thresParam1, thresParam2);
+
+		tick = (double)getTickCount(); // Time of detection
             
-        while ( key!=27 && TheVideoCapturer.grab())
-        {
-            TheVideoCapturer.retrieve( TheInputImage);
-            //copy image
+		int k=0;
+		while (capture.grab())
+		{
+			capture.retrieve(inputImage);
 
-            AvrgTime.first=((double)getTickCount()-tick)/getTickFrequency();
-            cout<<"Time detection="<<1000*AvrgTime.first<<" milliseconds"<<endl;
+			avgTime.first=((double)getTickCount() - tick) / getTickFrequency();
+			//cout << "Time detection = "<< 1000*avgTime.first << " milliseconds" << endl;
 
-            index++; //number of images captured
-            tick = (double)getTickCount();//for checking the speed
+			index++; //number of images captured
+			tick = (double)getTickCount();
 	    
-	    pos3D = localize(TheInputImage);
+			pos3D = localize(markerDetector, inputImage, markers, cameraParameters, markerSize);
 
-	    int x = 0; //chosen->id % 6;
-	    int y = 0; //chosen->id / 6;
-		
-	    cout<< "3D position [Fg] = (" << x-pos3D.at<float>(2,0) << ", " << y - pos3D.at<float>(0,0) << ", " << pos3D.at<float>(1,0) << ")" <<endl;
-
-	    cv::imshow("in",TheInputImage);
-	    waitKey(10);
-		
+			float x = pos3D.at<float>(0, 0); //chosen->id % 6;
+			float y = pos3D.at<float>(1, 0); //chosen->id / 6;
+			float z = pos3D.at<float>(2, 0);
+			pthread_mutex_lock(&mutex);
+			sprintf(pos_data, "Fm = %.6f, %.6f, %.6f", x, y, z);
+			cout << pos_data << endl;
+			pthread_mutex_unlock(&mutex);			
+			sem_post(&sem);
+		}
+	} catch (std::exception &ex) {
+		cout << "Exception :" << ex.what() << endl;
 	}
 
-    } catch (std::exception &ex) {
-        cout<<"Exception :"<<ex.what()<<endl;
-    }
-
-}
-/************************************
- *
- *
- *
- *
- ************************************/
-/*
-void cvTackBarEvents(int pos,void*)
-{
-    if (iThresParam1<3) iThresParam1=3;
-    if (iThresParam1%2!=1) iThresParam1++;
-    if (ThresParam2<1) ThresParam2=1;
-    ThresParam1=iThresParam1;
-    ThresParam2=iThresParam2;
-    MDetector.setThresholdParams(ThresParam1,ThresParam2);
-//recompute
-    MDetector.detect(TheInputImage,TheMarkers,TheCameraParameters);
-    TheInputImage.copyTo(TheInputImageCopy);
-    for (unsigned int i=0;i<TheMarkers.size();i++)	TheMarkers[i].draw(TheInputImageCopy,Scalar(0,0,255),1);
-    //print other rectangles that contains no valid markers
-    /*for (unsigned int i=0;i<MDetector.getCandidates().size();i++) {
-        aruco::Marker m( MDetector.getCandidates()[i],999);
-        m.draw(TheInputImageCopy,cv::Scalar(255,0,0));
-    }
-
-//draw a 3d cube in each marker if there is 3d info
-    if (TheCameraParameters.isValid())
-        for (unsigned int i=0;i<TheMarkers.size();i++)
-            CvDrawingUtils::draw3dCube(TheInputImageCopy,TheMarkers[i],TheCameraParameters);
-
-    cv::imshow("in",TheInputImageCopy);
-    cv::imshow("thres",MDetector.getThresholdedImage());
+	return 0;
 }
 
-*/
