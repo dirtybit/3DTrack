@@ -250,8 +250,8 @@ int main(int argc,char **argv)
 			float y = pos3D.at<float>(1, 0); //chosen->id / 6;
 			float z = pos3D.at<float>(2, 0);
 			pthread_mutex_lock(&mutex);
-			sprintf(pos_data, "Fm = %.6f, %.6f, %.6f", x, y, z);
-			cout << pos_data << endl;
+			sprintf(pos_data, "%.6f, %.6f, %.6f", x, y, z);
+			cout << "Fm = " << pos_data << endl;
 			pthread_mutex_unlock(&mutex);			
 			sem_post(&sem);
 		}
