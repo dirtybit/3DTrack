@@ -1,30 +1,3 @@
-/*****************************************************************************************
-Copyright 2011 Rafael Muñoz Salinas. All rights reserved.
-
-Redistribution and use in source and binary forms, with or without modification, are
-permitted provided that the following conditions are met:
-
-   1. Redistributions of source code must retain the above copyright notice, this list of
-      conditions and the following disclaimer.
-
-   2. Redistributions in binary form must reproduce the above copyright notice, this list
-      of conditions and the following disclaimer in the documentation and/or other materials
-      provided with the distribution.
-
-THIS SOFTWARE IS PROVIDED BY Rafael Muñoz Salinas ''AS IS'' AND ANY EXPRESS OR IMPLIED
-WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
-FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL Rafael Muñoz Salinas OR
-CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
-CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
-ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
-NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
-ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-The views and conclusions contained in the software and documentation are those of the
-authors and should not be interpreted as representing official policies, either expressed
-or implied, of Rafael Muñoz Salinas.
-********************************************************************************************/
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -89,12 +62,6 @@ bool readArguments ( int argc,char **argv )
  *
  *
  ************************************/
-void printP(cv::Mat p) {
-	for(int i=0; i < 3; i++)
-		cout << p.at<float>(i, 0) << " ";
-	cout << endl;
-}
-
 cv::Mat rmat(cv::Mat u, cv::Mat v, cv::Mat w) {
 	cv::Mat m = cv::Mat::eye(4, 4, CV_32F);
 	for(int i=0; i<3; i++) {
@@ -113,6 +80,70 @@ cv::Mat tmat(cv::Mat t) {
 
 	return m;
 }
+
+cv::Mat localize(cv::Mat frame)
+{
+	MDetector.detect(TheInputImage,TheMarkers,TheCameraParameters,TheMarkerSize);
+	    
+	float maxArea = 0;
+	float markerArea = 0;
+	Marker *chosen = NULL;
+	cv::Mat pos3D = cv::Mat::zeros(4, 1, CV_32F);
+
+	for (unsigned int i=0;i<TheMarkers.size();i++) {
+		markerArea = TheMarkers[i].getArea();
+		if (markerArea > maxArea) {
+			chosen = &TheMarkers[i];
+			maxArea = markerArea;
+		}
+	}
+
+	if (chosen) {
+		cv::Mat r(3,3,CV_32F);
+		cv::Mat coord_ = cv::Mat::zeros(4,1,CV_32F);
+		coord_.at<float>(3, 0) = 1;
+		cv::Mat coord(3,1,CV_32F);
+		cv::Mat u = cv::Mat::zeros(3,1,CV_32F);
+		cv::Mat v = cv::Mat::zeros(3,1,CV_32F);
+		cv::Mat w = cv::Mat::zeros(3,1,CV_32F);
+
+		//Unit vectors of Fm
+		u.at<float>(0,0) = 1;
+		v.at<float>(1,0) = 1;
+		w.at<float>(2,0) = 1;
+		
+		coord.at<float>(0,0) = 0;
+		coord.at<float>(1,0) = 0;
+		coord.at<float>(2,0) = 0;
+		
+		cv::Mat rotation = chosen->Rvec;
+		Rodrigues(rotation, r);
+		coord = r * coord;
+		coord = coord + chosen->Tvec;
+		
+		// Find unit vectors of Fm wrt Fg
+		u = r * u;
+		u = u + chosen->Tvec;       
+		v = r * v;
+		v = v + chosen->Tvec; 
+		w = r * w;
+		w = w + chosen->Tvec;
+		u -= coord;
+		v -= coord;
+		w -= coord;
+		
+		// Find translation, rotation, and transformation matrix for Fm -> Fg
+		cv::Mat R = rmat(u, v, w);
+		cv::Mat T = tmat(coord);
+		cv::Mat M = R*T;
+		coord_ = M*coord_;
+
+		pos3D = coord_;
+	}
+
+	return pos3D;
+}
+
 
 int main(int argc,char **argv)
 {
@@ -157,7 +188,7 @@ int main(int argc,char **argv)
         //Create gui
 
         //cv::namedWindow("thres",1);
-        //cv::namedWindow("in",1);
+        cv::namedWindow("in",1);
         MDetector.getThresholdParams( ThresParam1,ThresParam2);
         MDetector.setCornerRefinementMethod(MarkerDetector::LINES);
         iThresParam1=ThresParam1;
@@ -171,6 +202,7 @@ int main(int argc,char **argv)
 
         char key=0;
         int index=0;
+	Mat pos3D;
         //capture until press ESC or until the end of the video
 
 	double tick = (double)getTickCount();//for checking the speed
@@ -185,120 +217,20 @@ int main(int argc,char **argv)
 
             index++; //number of images captured
             tick = (double)getTickCount();//for checking the speed
-            //Detection of markers in the image passed
-            MDetector.detect(TheInputImage,TheMarkers,TheCameraParameters,TheMarkerSize);
-            //chekc the speed by calculating the mean speed of all iterations
-
-            //print marker info and draw the markers in image
-	    float maxArea = 0;
-	    float markerArea = 0;
-	    Marker *chosen = NULL;
-
-            //TheInputImage.copyTo(TheInputImageCopy);
-	    for (unsigned int i=0;i<TheMarkers.size();i++) {
-		    markerArea = TheMarkers[i].getArea();
-		    if (markerArea > maxArea) {
-			    chosen = &TheMarkers[i];
-			    maxArea = markerArea;
-		    }
-	    }
-//	    cout << "----------------------" << endl;
-	    //cv::Point2f center = chosen.getCenter();                
-	    if (chosen) {
-		    //cout << chosen << endl;				
-		    //cout<< "2D (" << center.x << ", " << center.y << ")" <<endl;
-		    //cout<< "2D (" << center.x << ", " << center.y << ")" <<endl;
-		    cv::Mat r(3,3,CV_32F);
-		    cv::Mat coord(3,1,CV_32F);
-		    cv::Mat coord_ = cv::Mat::zeros(4,1,CV_32F);
-		    coord_.at<float>(3, 0) = 1;
-		    cv::Mat u(3,1,CV_32F);
-		    cv::Mat v(3,1,CV_32F);
-		    cv::Mat w(3,1,CV_32F);
-		    //cv::Mat u_(3,1,CV_32F);
-		    //cv::Mat v_(3,1,CV_32F);
-		    // cv::Mat w_(3,1,CV_32F);
-		    u.at<float>(0,0) = 1;
-		    u.at<float>(1,0) = 0;
-		    u.at<float>(2,0) = 0;
-		    v.at<float>(0,0) = 0;
-		    v.at<float>(1,0) = 1;
-		    v.at<float>(2,0) = 0;
-		    w.at<float>(0,0) = 0;
-		    w.at<float>(1,0) = 0;
-		    w.at<float>(2,0) = 1;
-		    coord.at<float>(0,0) = 0;
-		    coord.at<float>(1,0) = 0;
-		    coord.at<float>(2,0) = 0;
-		    cv::Mat rotation = chosen->Rvec;
-		    Rodrigues(rotation, r);
-		    coord = r * coord;
-		    coord = coord + chosen->Tvec;
-		    //cout << "After tvec: ";
-		    //printP(coord);
-		    //cout << "After rvec: ";
-		    //printP(coord);      
-		    u = r * u;
-		    u = u + chosen->Tvec;       
-		    v = r * v;
-		    v = v + chosen->Tvec; 
-		    w = r * w;
-		    w = w + chosen->Tvec;
-		    u -= coord;
-		    v -= coord;
-		    w -= coord;
-		    //cv::normalize(u, u_);
-		    //cv::normalize(v, v_);
-		    //cv::normalize(w, w_);
-		    cv::Mat R = rmat(u, v, w);
-		    cv::Mat T = tmat(coord);
-		    cv::Mat M = R*T;
-		    coord_ = M*coord_;
-		    //printP(u);
-		    //printP(v);
-		    //printP(w);
-		    //cout << "Origin: ";
-		    //printP(coord);
-		    //printP(u_);
-		    //printP(v_);
-		    //printP(w_);
-//		    cout << "Perim " << chosen->getPerimeter() << endl; 
-//		    cout << "Area " << chosen->getArea() << endl; 
-		    int x = chosen->id % 6;
-		    int y = chosen->id / 6;
-		    cout<< "3D position [Fg] = (" << x-coord_.at<float>(2,0) << ", " << y - coord_.at<float>(0,0) << ", " << coord_.at<float>(1,0) << ")" <<endl;
-//		    cout<< "3D position [Fm] = (" << coord_.at<float>(0,0) << ", " << coord_.at<float>(1,0) << ", " << coord_.at<float>(2,0) << ")" <<endl;
-//		    cout<< "3D position [Fc] = (" << coord.at<float>(0,0) << ", " << coord.at<float>(1,0) << ", " << coord.at<float>(2,0) << ")" <<endl;
-		    //chosen->draw(TheInputImageCopy,Scalar(0,0,255),1);
-//		    cout << "----------------------" << endl;
-		    //if (TheCameraParameters.isValid())
-			    //CvDrawingUtils::draw3dAxis(TheInputImageCopy, *chosen, TheCameraParameters);
-	    }
-	    /*
-            //print other rectangles that contains no valid markers
-            for (unsigned int i=0;i<MDetector.getCandidates().size();i++) {
-                aruco::Marker m( MDetector.getCandidates()[i],999);
-                m.draw(TheInputImageCopy,cv::Scalar(255,0,0));
-            }
-	    */
-
-
-            //draw a 3d cube in each marker if there is 3d info
 	    
-            
+	    pos3D = localize(TheInputImage);
 
-            //DONE! Easy, right?
-            //cout<<endl<<endl<<endl;
-            //show input with augmented information and  the thresholded image
-            //cv::imshow("in",TheInputImageCopy);
-            //cv::imshow("thres",MDetector.getThresholdedImage());
+	    int x = 0; //chosen->id % 6;
+	    int y = 0; //chosen->id / 6;
+		
+	    cout<< "3D position [Fg] = (" << x-pos3D.at<float>(2,0) << ", " << y - pos3D.at<float>(0,0) << ", " << pos3D.at<float>(1,0) << ")" <<endl;
 
-            //key=cv::waitKey(waitTime);//wait for key to be pressed
-        }
+	    cv::imshow("in",TheInputImage);
+	    waitKey(10);
+		
+	}
 
-    } catch (std::exception &ex)
-
-    {
+    } catch (std::exception &ex) {
         cout<<"Exception :"<<ex.what()<<endl;
     }
 
