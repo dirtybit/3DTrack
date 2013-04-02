@@ -85,13 +85,17 @@ if __name__ == '__main__':
     if args.net:
         net_str = args.net.split(':')
         HOST, PORT = net_str[0], int(net_str[1])
-        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client = socket(AF_INET, SOCK_STREAM)
         client.connect((HOST, PORT))
         print 'connected'
         while 1:
             data = client.recv(1024)
             if not data: break
-            data = map(float, data.split(', '))
+            print '-%s-' % data
+            try:
+                data = map(float, data.split(', '))
+            except Exception:
+                continue
             x, y, z, dt = data[0], data[1], data[2], data[3]
             rate(int(1000/dt))
             copter.pos = transform_w2f(x, y, z) #copter.pos + copter.velocity*dt
