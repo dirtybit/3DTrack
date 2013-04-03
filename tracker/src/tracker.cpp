@@ -32,6 +32,7 @@ struct coord {
 	float y;
 } markerCoords[NUM_OF_MARKERS];
 
+int gui_enabled = 0;
 int verbose = 0;
 int failedFrameNumber = 0;
 int saveFailedFrames = 0;
@@ -179,6 +180,9 @@ int localize(MarkerDetector &markerDetector, cv::Mat &frame, vector<Marker> &mar
 		pos3D.at<float>(1, 0) = y - coord_.at<float>(0, 0);
 		pos3D.at<float>(2, 0) = z;
 		pos3D.at<float>(3, 0) = 1;
+
+		if (gui_enabled)
+			chosen->draw(frame, Scalar(0,0,255), 1);
 		
 		return 1;
 	}
@@ -261,14 +265,14 @@ int main(int argc,char **argv)
 
 	initMarkerCoordinates();
 
-
-	pthread_create(&child, &attr, run_server, NULL);
+	if (gui_enabled)
+		cv::namedWindow("in",1);
 
 	try {
 		// Read command-line arguments
 		if (argc<2) {
 			cerr<<"Invalid number of arguments"<<endl;
-			cerr<<"Usage: (in.avi|live) [width] [height] [intrinsics.yml] [size]"<<endl;
+			cerr<<"Usage: (in.avi|live) [width] [height] [intrinsics.yml] [size] [verbose] [gui] [framelog] [log_path]"<<endl;
 			return false;
 		}
 
@@ -285,9 +289,11 @@ int main(int argc,char **argv)
 		if (argc > 6)
 			verbose=atoi(argv[6]);
 		if (argc > 7)
-			saveFailedFrames=atoi(argv[7]);
+			gui_enabled=atoi(argv[7]);
 		if (argc > 8)
-			outputPath=argv[8];
+			saveFailedFrames=atoi(argv[8]);
+		if (argc > 9)
+			outputPath=argv[9];
 
 		if (argc == 5)
 			cerr<<"NOTE: You need makersize to see 3d info!!!!"<<endl;
@@ -314,7 +320,9 @@ int main(int argc,char **argv)
 
 		}
 
-		// Read camera paramters
+		pthread_create(&child, &attr, run_server, NULL);
+
+                // Read camera paramters
 		if (intrinsicFile!="") {
 			capture >> inputImage;
 			cameraParameters.readFromXMLFile(intrinsicFile);
@@ -323,8 +331,6 @@ int main(int argc,char **argv)
 
 		if (pyrDownLevel > 0)
 			markerDetector.pyrDown(pyrDownLevel);
-
-		cv::namedWindow("in", 1);
 		
 		//markerDetector.getThresholdParams(ThresParam1, ThresParam2);
 		//markerDetector.setCornerRefinementMethod(MarkerDetector::LINES);
@@ -345,7 +351,7 @@ int main(int argc,char **argv)
 
 			index++; //number of images captured
 			tick = (double)getTickCount();
-	    
+			
 			res = localize(markerDetector, inputImage, markers, cameraParameters, markerSize, pos3D);
 
 			if(verbose) {
@@ -370,9 +376,15 @@ int main(int argc,char **argv)
 			pthread_mutex_lock(&mutex);
 			found = res;
 			sprintf(pos_data, "%.6f, %.6f, %.6f, %.6f", x, y, z, 1000*avgTime.first);
-			cout << "Fm = " << pos_data << endl;
 			pthread_mutex_unlock(&mutex);			
 			sem_post(&sem);
+			
+			if (found && verbose)
+				cout << "Fm = " << pos_data << endl;
+
+			if (gui_enabled)
+				cv::imshow("in", inputImage);
+			
 		}
 	} catch (std::exception &ex) {
 		cout << "Exception :" << ex.what() << endl;
