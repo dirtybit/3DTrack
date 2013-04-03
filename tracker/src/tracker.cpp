@@ -382,8 +382,10 @@ int main(int argc,char **argv)
 			if (found && verbose)
 				cout << "Fm = " << pos_data << endl;
 
-			if (gui_enabled)
+			if (gui_enabled) {
 				cv::imshow("in", inputImage);
+				waitKey(10);
+			}
 			
 		}
 	} catch (std::exception &ex) {
