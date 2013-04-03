@@ -298,7 +298,7 @@ int main(int argc,char **argv)
 		if (argc == 5)
 			cerr<<"NOTE: You need makersize to see 3d info!!!!"<<endl;
 
-		if (argc == 8) {
+		if (argc == 9) {
 			cerr<<"NOTE: You have to specify output path!!!!"<<endl;
 			exit(0);
 		}
