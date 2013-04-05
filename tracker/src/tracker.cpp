@@ -10,6 +10,7 @@
 #include <netinet/in.h>
 #include <netdb.h>
 #include <arpa/inet.h>
+#include <getopt.h>			
 #include "aruco.h"
 #include "cvdrawingutils.h"
 using namespace cv;
@@ -267,6 +268,62 @@ int main(int argc,char **argv)
 
 	if (gui_enabled)
 		cv::namedWindow("in",1);
+
+
+	struct option opts[] = {
+		{"input", 1, 0, 'i'},
+		{"size", 1, 0, 's'},
+		{"calib", 1, 0, 'c'},
+		{"port", 1, 0, 'p'},
+		{"width", 1, 0, 'w'},
+		{"height", 1, 0, 'h'},
+		{"logframe", 2, 0, 'l'},
+		{"verbose", 0, 0, 'v'},
+		{"gui", 0, 0, 'g'},
+		{0, 0, 0, 0}
+	};
+
+	int c;
+
+	while ((c = getopt_long(argc, argv, "w:h:i:s:c:p:l::vg", opts, NULL)) != -1) {
+		switch (c) {
+		case 'w':
+			printf("%c %s\n", c, optarg);
+			break;
+		case 'h':
+			printf("%c %s\n", c, optarg);
+			break;
+		case 'i':
+			printf("%c %s\n", c, optarg);
+			break;
+		case 's':
+			printf("%c %s\n", c, optarg);
+			break;
+		case 'c':
+			printf("%c %s\n", c, optarg);
+			break;
+		case 'p':
+			printf("%c %s\n", c, optarg);
+			break;
+		case 'l':
+			if (optarg)
+				printf("%c %s\n", c, optarg);
+			else
+				printf("%c\n", c);
+			break;
+		case 'v':			
+			printf("%c\n", c);
+			break;
+		case 'g':
+			printf("%c\n", c);
+			break;
+		default:
+			printf("Invalid option -%c\n", c);
+
+			return 1;
+		}
+	}
+
 
 	try {
 		// Read command-line arguments
