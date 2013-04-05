@@ -128,6 +128,15 @@ cv::Mat tmat(cv::Mat t) {
 	return m;
 }
 
+void printPoint(Mat p, string label)
+{
+    cout << label << ": ";
+
+    for (int i=0; i < 3; i++)
+        cout << p.at<float>(i, 0) << " ";
+    cout << endl;
+}
+
 int localize(MarkerDetector &markerDetector, cv::Mat &frame, vector<Marker> &markers, CameraParameters cameraParameters, float markerSize, cv::Mat &pos3D)
 {
 	markerDetector.detect(frame, markers, cameraParameters, markerSize);
@@ -155,8 +164,16 @@ int localize(MarkerDetector &markerDetector, cv::Mat &frame, vector<Marker> &mar
 		u.at<float>(0,0) = 1;
 		v.at<float>(1,0) = 1;
 		w.at<float>(2,0) = 1;
+		printPoint(chosen->Rvec, "RVEC");
+		printPoint(chosen->Tvec, "TVEC");
+
 		cv::Mat rotation = chosen->Rvec;
 		Rodrigues(rotation, r);
+
+		for(int i=0; i < 3; i++)
+			for(int j=0; j < 3; j++)
+				cout << r.at<float>(i, j) << ", ";
+
 		coord = r * coord;
 		coord = coord + chosen->Tvec; 
 		u = r * u;
@@ -242,12 +259,14 @@ int main(int argc,char **argv)
 {
 	string inputSource;
 	string intrinsicFile;
+	string fileName;
 	float markerSize=-1;
 	int pyrDownLevel = 0;
 	MarkerDetector markerDetector;
 	VideoCapture capture;
 	vector<Marker> markers;
 	Mat inputImage;
+	Mat prevInputImage;
 	CameraParameters cameraParameters;
 	pair<double,double> avgTime(0,0) ;//determines the average time required for detection
 	float thresParam1, thresParam2;		
@@ -295,13 +314,10 @@ int main(int argc,char **argv)
 		if (argc > 9)
 			outputPath=argv[9];
 
-		if (argc == 5)
-			cerr<<"NOTE: You need makersize to see 3d info!!!!"<<endl;
-
 		if (argc == 9) {
 			cerr<<"NOTE: You have to specify output path!!!!"<<endl;
 			exit(0);
-		}
+        }
 
 		//read from camera or from  file
 		if (inputSource=="live") {
@@ -309,22 +325,26 @@ int main(int argc,char **argv)
 
 			capture.set(CV_CAP_PROP_FRAME_WIDTH, width);
 			capture.set(CV_CAP_PROP_FRAME_HEIGHT, height);
+			capture >> inputImage;
 		
 		}
-		else  
+		else if (inputSource == "frame") {
+			fileName = argv[2];
+			intrinsicFile = argv[3];
+			markerSize = atof(argv[4]);
+			inputImage = imread(fileName);
+			gui_enabled = 1;
+		}
+		else
 			capture.open(inputSource);
 		
-		if (!capture.isOpened()) {
+		if (!capture.isOpened() && inputSource != "frame") {
 			cerr << "Could not open video" << endl;
 			return -1;
-
 		}
-
-		pthread_create(&child, &attr, run_server, NULL);
 
                 // Read camera paramters
 		if (intrinsicFile!="") {
-			capture >> inputImage;
 			cameraParameters.readFromXMLFile(intrinsicFile);
 			cameraParameters.resize(inputImage.size());
 		}
@@ -342,52 +362,82 @@ int main(int argc,char **argv)
 		tick = (double)getTickCount(); // Time of detection
 		
 		int res;
-		while (capture.grab())
-		{
-			capture.retrieve(inputImage);
+		float prev_x = 0;
+		float prev_y = 0;
+		float x = 0, y = 0, z = 0;
 
-			avgTime.first=((double)getTickCount() - tick) / getTickFrequency();
-			//cout << "Time detection = "<< 1000*avgTime.first << " milliseconds" << endl;
-
-			index++; //number of images captured
-			tick = (double)getTickCount();
-			
+		if (inputSource == "frame") {
 			res = localize(markerDetector, inputImage, markers, cameraParameters, markerSize, pos3D);
-
-			if(verbose) {
-				if (res == 0) // no marker in the current frame
-					failedFrameNumber++;
-
-				cerr << "No markers in " << failedFrameNumber << " frames out of " << index << endl;
-			}
-
-			if(saveFailedFrames){
-				if (res == 0) {
-					sprintf(savedFrame, "%sframe_%d.png", outputPath, index);
-					imwrite(savedFrame, inputImage);
-					cout << "Frame " << index << " saved to: " << savedFrame << endl;
-				}
-
-			}
-
-			float x = pos3D.at<float>(0, 0);
-			float y = pos3D.at<float>(1, 0);
-			float z = pos3D.at<float>(2, 0);
-			pthread_mutex_lock(&mutex);
-			found = res;
-			sprintf(pos_data, "%.6f, %.6f, %.6f, %.6f", x, y, z, 1000*avgTime.first);
-			pthread_mutex_unlock(&mutex);			
-			sem_post(&sem);
-			
-			if (found && verbose)
-				cout << "Fm = " << pos_data << endl;
-
+			x = pos3D.at<float>(0, 0);
+			y = pos3D.at<float>(1, 0);
+			z = pos3D.at<float>(2, 0);
+			printf("Fm = %.2f %.2f %.2f \n", x, y, z);
 			if (gui_enabled) {
 				cv::imshow("in", inputImage);
-				waitKey(10);
+				waitKey(3000);
 			}
-			
 		}
+		else
+			
+			pthread_create(&child, &attr, run_server, NULL);
+
+			while (capture.grab())
+			{
+				inputImage.copyTo(prevInputImage);
+				capture.retrieve(inputImage);
+
+				avgTime.first=((double)getTickCount() - tick) / getTickFrequency();
+				//cout << "Time detection = "<< 1000*avgTime.first << " milliseconds" << endl;
+
+				index++; //number of images captured
+				tick = (double)getTickCount();
+			
+				res = localize(markerDetector, inputImage, markers, cameraParameters, markerSize, pos3D);
+
+				if(verbose) {
+					if (res == 0) // no marker in the current frame
+						failedFrameNumber++;
+
+					cerr << "No markers in " << failedFrameNumber << " frames out of " << index << endl;
+				}
+
+				if(saveFailedFrames){
+					if (res == 0) {
+						sprintf(savedFrame, "%sframe_%d.png", outputPath, index);
+						imwrite(savedFrame, inputImage);
+						cout << "Frame " << index << " saved to: " << savedFrame << endl;
+					}
+
+				}
+
+				prev_x = x;
+				prev_y = y;
+				x = pos3D.at<float>(0, 0);
+				y = pos3D.at<float>(1, 0);
+				z = pos3D.at<float>(2, 0);
+				pthread_mutex_lock(&mutex);
+				found = res;
+				sprintf(pos_data, "%.6f, %.6f, %.6f, %.6f", x, y, z, 1000*avgTime.first);
+				pthread_mutex_unlock(&mutex);			
+				sem_post(&sem);
+
+				if((prev_x * x < 0) || (prev_y * y < 0)) {
+					sprintf(savedFrame, "./frame_%d.png", index);
+					imwrite(savedFrame, inputImage);
+					sprintf(savedFrame, "./frame_%d.png", index-1);
+					imwrite(savedFrame, prevInputImage);
+					cout << "Frame " << index << " saved to: " << savedFrame << endl;
+				}
+			
+				if (found && verbose)
+					cout << "Fm = " << pos_data << endl;
+
+				if (gui_enabled) {
+					cv::imshow("in", inputImage);
+					waitKey(10);
+				}
+			
+			}
 	} catch (std::exception &ex) {
 		cout << "Exception :" << ex.what() << endl;
 	}
