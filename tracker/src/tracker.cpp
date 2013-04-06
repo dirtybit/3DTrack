@@ -16,29 +16,42 @@
 using namespace cv;
 using namespace aruco;
 
-#define PORT 9090
 #define NUM_OF_MARKERS 209
+
+struct coord {
+    float x;
+    float y;
+} markerCoords[NUM_OF_MARKERS];
+
+struct option opts[] = {
+    {"input", 1, 0, 'i'},
+    {"size", 1, 0, 's'},
+    {"calib", 1, 0, 'c'},
+    {"port", 1, 0, 'p'},
+    {"width", 1, 0, 'w'},
+    {"height", 1, 0, 'h'},
+    {"logframe", 2, 0, 'l'},
+    {"verbose", 0, 0, 'v'},
+    {"gui", 0, 0, 'g'},
+    {0, 0, 0, 0}
+};
+
+string inputSource;
+string calibFile;
+int port = 0;
+int width = 640;
+int height = 480;
+float markerSize = 0;
+int guiEnabled = 0;
+int verboseEnabled = 0;
+int logframeEnabled = 0;
+char outputPath[200];
+int pyrDownLevel = 0;
 
 sem_t sem;
 pthread_mutex_t mutex;
-
-int width=320;
-int height=240;
-
-char pos_data[200];
+char posData[200];
 int found;
-
-struct coord {
-	float x;
-	float y;
-} markerCoords[NUM_OF_MARKERS];
-
-int gui_enabled = 0;
-int verbose = 0;
-int failedFrameNumber = 0;
-int saveFailedFrames = 0;
-char* savedFrame = new char[25];
-char* outputPath = new char[200];
 
 void initMarkerCoordinates()
 {
@@ -108,10 +121,8 @@ void initMarkerCoordinates()
 	}
 }
 
-
-
-cv::Mat rmat(cv::Mat u, cv::Mat v, cv::Mat w) {
-	cv::Mat m = cv::Mat::eye(4, 4, CV_32F);
+Mat rmat(Mat u, Mat v, Mat w) {
+    Mat m = Mat::eye(4, 4, CV_32F);
 	for(int i=0; i<3; i++) {
 		m.at<float>(0, i) = u.at<float>(i,0);
 		m.at<float>(1, i) = v.at<float>(i,0);
@@ -120,8 +131,8 @@ cv::Mat rmat(cv::Mat u, cv::Mat v, cv::Mat w) {
 	return m;
 }
 
-cv::Mat tmat(cv::Mat t) {
-	cv::Mat m = cv::Mat::eye(4, 4, CV_32F);
+Mat tmat(Mat t) {
+    Mat m = Mat::eye(4, 4, CV_32F);
 	m.at<float>(0, 3) = -t.at<float>(0,0);
 	m.at<float>(1, 3) = -t.at<float>(1,0);
 	m.at<float>(2, 3) = -t.at<float>(2,0);
@@ -129,7 +140,37 @@ cv::Mat tmat(cv::Mat t) {
 	return m;
 }
 
-int localize(MarkerDetector &markerDetector, cv::Mat &frame, vector<Marker> &markers, CameraParameters cameraParameters, float markerSize, cv::Mat &pos3D)
+Mat computeTransMat(Mat rvec, Mat tvec)
+{
+    Mat r(3,3,CV_32F);
+    Mat coord = Mat::zeros(3,1,CV_32F);
+    Mat u = Mat::zeros(3,1,CV_32F);
+    Mat v = Mat::zeros(3,1,CV_32F);
+    Mat w = Mat::zeros(3,1,CV_32F);
+    Mat rotation = rvec;
+    u.at<float>(0,0) = 1;
+    v.at<float>(1,0) = 1;
+    w.at<float>(2,0) = 1;
+    Rodrigues(rotation, r);
+    coord = r * coord;
+    coord = coord + tvec;
+    u = r * u;
+    u = u + tvec;
+    v = r * v;
+    v = v + tvec;
+    w = r * w;
+    w = w + tvec;
+    u -= coord;
+    v -= coord;
+    w -= coord;
+    Mat R = rmat(u, v, w);
+    Mat T = tmat(coord);
+    Mat M = R*T;
+
+    return M;
+}
+
+int localize(MarkerDetector &markerDetector, Mat &frame, vector<Marker> &markers, CameraParameters cameraParameters, float markerSize, Mat &pos3D)
 {
 	markerDetector.detect(frame, markers, cameraParameters, markerSize);
 	    
@@ -137,7 +178,7 @@ int localize(MarkerDetector &markerDetector, cv::Mat &frame, vector<Marker> &mar
 	float markerArea = 0;
 	Marker *chosen = NULL;
 
-	for (unsigned int i=0;i<markers.size();i++) {
+    for (unsigned int i=0; i < markers.size(); i++) {
 		markerArea = markers[i].getArea();
 		if (markerArea > maxArea) {
 			chosen = &markers[i];
@@ -146,43 +187,21 @@ int localize(MarkerDetector &markerDetector, cv::Mat &frame, vector<Marker> &mar
 	}
 
 	if (chosen) {
-		cv::Mat r(3,3,CV_32F);
-		cv::Mat coord = cv::Mat::zeros(3,1,CV_32F);
-		cv::Mat coord_ = cv::Mat::zeros(4,1,CV_32F);
-		coord_.at<float>(3, 0) = 1;
-		cv::Mat u = cv::Mat::zeros(3,1,CV_32F);
-		cv::Mat v = cv::Mat::zeros(3,1,CV_32F);
-		cv::Mat w = cv::Mat::zeros(3,1,CV_32F);
-		u.at<float>(0,0) = 1;
-		v.at<float>(1,0) = 1;
-		w.at<float>(2,0) = 1;
-		cv::Mat rotation = chosen->Rvec;
-		Rodrigues(rotation, r);
-		coord = r * coord;
-		coord = coord + chosen->Tvec; 
-		u = r * u;
-		u = u + chosen->Tvec;       
-		v = r * v;
-		v = v + chosen->Tvec; 
-		w = r * w;
-		w = w + chosen->Tvec;
-		u -= coord;
-		v -= coord;
-		w -= coord;
-		cv::Mat R = rmat(u, v, w);
-		cv::Mat T = tmat(coord);
-		cv::Mat M = R*T;
-		coord_ = M*coord_;
+        Mat position = Mat::zeros(4,1,CV_32F);
+        Mat transMat;
+        position.at<float>(3, 0) = 1;
+        transMat = computeTransMat(chosen->Rvec, chosen->Tvec);
+        position = transMat*position;
 
 		float x = markerCoords[chosen->id].x;
 		float y = markerCoords[chosen->id].y;
-		float z = coord_.at<float>(1, 0);
-		pos3D.at<float>(0, 0) = x - coord_.at<float>(2, 0);
-		pos3D.at<float>(1, 0) = y - coord_.at<float>(0, 0);
+        float z = position.at<float>(1, 0);
+        pos3D.at<float>(0, 0) = x - position.at<float>(2, 0);
+        pos3D.at<float>(1, 0) = y - position.at<float>(0, 0);
 		pos3D.at<float>(2, 0) = z;
 		pos3D.at<float>(3, 0) = 1;
 
-		if (gui_enabled)
+        if (guiEnabled)
 			chosen->draw(frame, Scalar(0,0,255), 1);
 		
 		return 1;
@@ -193,7 +212,7 @@ int localize(MarkerDetector &markerDetector, cv::Mat &frame, vector<Marker> &mar
 
 void* run_server(void *args)
 {
-	int sock, conn, bytes_received, flag = 1;
+    int sock, conn, flag = 1;
 	struct sockaddr_in server_addr, client_addr;
 	socklen_t sin_size;
 
@@ -208,7 +227,7 @@ void* run_server(void *args)
 	}
 
 	server_addr.sin_family = AF_INET;
-	server_addr.sin_port = htons(PORT);
+    server_addr.sin_port = htons(port);
 	server_addr.sin_addr.s_addr = INADDR_ANY;
 	bzero(&(server_addr.sin_zero), 8);
 
@@ -223,7 +242,7 @@ void* run_server(void *args)
 		exit(1);
 	}
 
-	printf("\nTCPServer Waiting for client on port %d\n", PORT);
+    printf("\nTCPServer Waiting for client on port %d\n", port);
 	fflush(stdout); 
 
 	sin_size = sizeof(client_addr);
@@ -234,27 +253,66 @@ void* run_server(void *args)
 		sem_wait(&sem);
 		pthread_mutex_lock(&mutex);
 		if (found)
-			send(conn, pos_data, strlen(pos_data), 0);
+            send(conn, posData, strlen(posData), 0);
 		pthread_mutex_unlock(&mutex);
 	}
 }
 
 int main(int argc,char **argv)
 {
-	string inputSource;
-	string intrinsicFile;
-	float markerSize=-1;
-	int pyrDownLevel = 0;
 	MarkerDetector markerDetector;
 	VideoCapture capture;
 	vector<Marker> markers;
 	Mat inputImage;
 	CameraParameters cameraParameters;
 	pair<double,double> avgTime(0,0) ;//determines the average time required for detection
-	float thresParam1, thresParam2;		
-	int index=0;
-	Mat pos3D = cv::Mat::zeros(4, 1, CV_32F);
-	double tick;
+    float thresParam1, thresParam2;
+    double tick;
+    int c;
+    char frameFileName[20];
+    int failedFrames = 0;
+    int totalFrames = 0;
+    Mat pos3D = Mat::zeros(4, 1, CV_32F);
+
+    // Parse command-line arguments
+    while ((c = getopt_long(argc, argv, "w:h:i:s:c:p:l::vg", opts, NULL)) != -1) {
+        switch (c) {
+        case 'w':
+            width = atoi(optarg);
+            break;
+        case 'h':
+            height = atoi(optarg);
+            break;
+        case 'i':
+            inputSource = optarg;
+            break;
+        case 's':
+            markerSize = atof(optarg);
+            break;
+        case 'c':
+            calibFile = optarg;
+            break;
+        case 'p':
+            port = atoi(optarg);
+            break;
+        case 'l':
+            logframeEnabled = 1;
+            if (optarg)
+                sprintf(outputPath, "%s", optarg);
+            else
+                sprintf(outputPath, "./logs");
+            break;
+        case 'v':
+            verboseEnabled = 1;
+            break;
+        case 'g':
+            guiEnabled = 1;
+            break;
+        default:
+            printf("Invalid option %c\n", c);
+            return 1;
+        }
+    }
 
 	// Initialize sync 	
 	pthread_t child;
@@ -264,191 +322,90 @@ int main(int argc,char **argv)
 	pthread_mutex_init(&mutex, NULL);
 	sem_init(&sem, 0, 0);
 
+    // Initialize marker coordinate mapping
 	initMarkerCoordinates();
 
-	if (gui_enabled)
-		cv::namedWindow("in",1);
+    // GUI window if enabled
+    if (guiEnabled)
+        namedWindow("in",1);
 
+    //read from camera or from  file
+    if (inputSource == "live") {
+        cout << capture.open(0) << endl;
 
-	struct option opts[] = {
-		{"input", 1, 0, 'i'},
-		{"size", 1, 0, 's'},
-		{"calib", 1, 0, 'c'},
-		{"port", 1, 0, 'p'},
-		{"width", 1, 0, 'w'},
-		{"height", 1, 0, 'h'},
-		{"logframe", 2, 0, 'l'},
-		{"verbose", 0, 0, 'v'},
-		{"gui", 0, 0, 'g'},
-		{0, 0, 0, 0}
-	};
+        capture.set(CV_CAP_PROP_FRAME_WIDTH, width);
+        capture.set(CV_CAP_PROP_FRAME_HEIGHT, height);
+    }
+    else
+        capture.open(inputSource);
 
-	int c;
+    if (!capture.isOpened()) {
+        cerr << "Could not open video" << endl;
+        return -1;
+    }
 
-	while ((c = getopt_long(argc, argv, "w:h:i:s:c:p:l::vg", opts, NULL)) != -1) {
-		switch (c) {
-		case 'w':
-			printf("%c %s\n", c, optarg);
-			break;
-		case 'h':
-			printf("%c %s\n", c, optarg);
-			break;
-		case 'i':
-			printf("%c %s\n", c, optarg);
-			break;
-		case 's':
-			printf("%c %s\n", c, optarg);
-			break;
-		case 'c':
-			printf("%c %s\n", c, optarg);
-			break;
-		case 'p':
-			printf("%c %s\n", c, optarg);
-			break;
-		case 'l':
-			if (optarg)
-				printf("%c %s\n", c, optarg);
-			else
-				printf("%c\n", c);
-			break;
-		case 'v':			
-			printf("%c\n", c);
-			break;
-		case 'g':
-			printf("%c\n", c);
-			break;
-		default:
-			printf("Invalid option -%c\n", c);
+    // Read camera paramters
+    if (calibFile != "") {
+        capture >> inputImage;
+        cameraParameters.readFromXMLFile(calibFile);
+        cameraParameters.resize(inputImage.size());
+    }
 
-			return 1;
-		}
-	}
+    if (pyrDownLevel > 0)
+        markerDetector.pyrDown(pyrDownLevel);
 
+    //markerDetector.getThresholdParams(ThresParam1, ThresParam2);
+    //markerDetector.setCornerRefinementMethod(MarkerDetector::LINES);
 
-	try {
-		// Read command-line arguments
-		if (argc<2) {
-			cerr<<"Invalid number of arguments"<<endl;
-			cerr<<"Usage: (in.avi|live) [width] [height] [intrinsics.yml] [size] [verbose] [gui] [framelog] [log_path]"<<endl;
-			return false;
-		}
+    thresParam1 = 13;
+    thresParam2 = 2;
+    markerDetector.setThresholdParams(thresParam1, thresParam2);
 
-		inputSource=argv[1];
+    tick = (double)getTickCount(); // Time of detection
 
-		if (argc > 2)
-			width=atoi(argv[2]);
-		if (argc > 3)
-			height=atoi(argv[3]);
-		if (argc > 4)
-			intrinsicFile=argv[4];
-		if (argc > 5)
-			markerSize=atof(argv[5]);
-		if (argc > 6)
-			verbose=atoi(argv[6]);
-		if (argc > 7)
-			gui_enabled=atoi(argv[7]);
-		if (argc > 8)
-			saveFailedFrames=atoi(argv[8]);
-		if (argc > 9)
-			outputPath=argv[9];
+    // If a port number specified, then dispatch the thread
+    if (port)
+        pthread_create(&child, &attr, run_server, NULL);
 
-		if (argc == 5)
-			cerr<<"NOTE: You need makersize to see 3d info!!!!"<<endl;
+    int res;
+    while (capture.grab())
+    {
+        capture.retrieve(inputImage);
 
-		if (argc == 9) {
-			cerr<<"NOTE: You have to specify output path!!!!"<<endl;
-			exit(0);
-		}
+        avgTime.first=((double)getTickCount() - tick) / getTickFrequency();
 
-		//read from camera or from  file
-		if (inputSource=="live") {
-			cout << capture.open(0) << endl;
+        totalFrames++; //number of images captured
+        tick = (double)getTickCount();
 
-			capture.set(CV_CAP_PROP_FRAME_WIDTH, width);
-			capture.set(CV_CAP_PROP_FRAME_HEIGHT, height);
-		
-		}
-		else  
-			capture.open(inputSource);
-		
-		if (!capture.isOpened()) {
-			cerr << "Could not open video" << endl;
-			return -1;
+        res = localize(markerDetector, inputImage, markers, cameraParameters, markerSize, pos3D);
 
-		}
+        if (res == 0) // no marker in the current frame
+            failedFrames++;
 
-		pthread_create(&child, &attr, run_server, NULL);
+        if(logframeEnabled && (res == 0)) {
+            sprintf(frameFileName, "%sframe_%d.png", outputPath, totalFrames);
+            imwrite(frameFileName, inputImage);
+            cout << "Frame " << totalFrames << " saved to: " << frameFileName << endl;
+        }
 
-                // Read camera paramters
-		if (intrinsicFile!="") {
-			capture >> inputImage;
-			cameraParameters.readFromXMLFile(intrinsicFile);
-			cameraParameters.resize(inputImage.size());
-		}
+        float x = pos3D.at<float>(0, 0);
+        float y = pos3D.at<float>(1, 0);
+        float z = pos3D.at<float>(2, 0);
 
-		if (pyrDownLevel > 0)
-			markerDetector.pyrDown(pyrDownLevel);
-		
-		//markerDetector.getThresholdParams(ThresParam1, ThresParam2);
-		//markerDetector.setCornerRefinementMethod(MarkerDetector::LINES);
-		
-		thresParam1 = 13;
-		thresParam2 = 2;
-		markerDetector.setThresholdParams(thresParam1, thresParam2);
+        pthread_mutex_lock(&mutex);
+        found = res;
+        sprintf(posData, "%.6f, %.6f, %.6f, %.6f", x, y, z, 1000*avgTime.first);
+        pthread_mutex_unlock(&mutex);
+        sem_post(&sem);
 
-		tick = (double)getTickCount(); // Time of detection
-		
-		int res;
-		while (capture.grab())
-		{
-			capture.retrieve(inputImage);
+        if (found && verboseEnabled)
+            fprintf(stderr, "[%5d/%5d] Pos = %s\n", failedFrames, totalFrames, posData);
 
-			avgTime.first=((double)getTickCount() - tick) / getTickFrequency();
-			//cout << "Time detection = "<< 1000*avgTime.first << " milliseconds" << endl;
-
-			index++; //number of images captured
-			tick = (double)getTickCount();
-			
-			res = localize(markerDetector, inputImage, markers, cameraParameters, markerSize, pos3D);
-
-			if(verbose) {
-				if (res == 0) // no marker in the current frame
-					failedFrameNumber++;
-
-				cerr << "No markers in " << failedFrameNumber << " frames out of " << index << endl;
-			}
-
-			if(saveFailedFrames){
-				if (res == 0) {
-					sprintf(savedFrame, "%sframe_%d.png", outputPath, index);
-					imwrite(savedFrame, inputImage);
-					cout << "Frame " << index << " saved to: " << savedFrame << endl;
-				}
-
-			}
-
-			float x = pos3D.at<float>(0, 0);
-			float y = pos3D.at<float>(1, 0);
-			float z = pos3D.at<float>(2, 0);
-			pthread_mutex_lock(&mutex);
-			found = res;
-			sprintf(pos_data, "%.6f, %.6f, %.6f, %.6f", x, y, z, 1000*avgTime.first);
-			pthread_mutex_unlock(&mutex);			
-			sem_post(&sem);
-			
-			if (found && verbose)
-				cout << "Fm = " << pos_data << endl;
-
-			if (gui_enabled) {
-				cv::imshow("in", inputImage);
-				waitKey(10);
-			}
-			
-		}
-	} catch (std::exception &ex) {
-		cout << "Exception :" << ex.what() << endl;
-	}
+        if (guiEnabled) {
+            imshow("in", inputImage);
+            waitKey(10);
+        }
+    }
 
 	return 0;
 }
-
